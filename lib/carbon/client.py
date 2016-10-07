@@ -35,7 +35,7 @@ class CarbonClientProtocol(Int32StringReceiver):
     self.slowConnectionReset = 'destinations.%s.slowConnectionReset' % self.destinationName
 
     self.factory.connectionMade.callback(self)
-    self.factory.connectionMade = Deferred()
+    self.factory.resetConnectionMade()
     self.sendQueued()
 
   def connectionLost(self, reason):
@@ -162,7 +162,8 @@ class CarbonClientProtocol(Int32StringReceiver):
 class CarbonClientFactory(ReconnectingClientFactory):
   maxDelay = 5
 
-  def __init__(self, destination):
+  def __init__(self, router, destination):
+    self.router = router
     self.destination = destination
     self.destinationName = ('%s:%d:%s' % destination).replace('.', '_')
     self.host, self.port, self.carbon_instance = destination
@@ -177,14 +178,25 @@ class CarbonClientFactory(ReconnectingClientFactory):
     self.queueHasSpace = Deferred()
     self.queueHasSpace.addCallback(self.queueSpaceCallback)
     self.connectFailed = Deferred()
-    self.connectionMade = Deferred()
-    self.connectionLost = Deferred()
+    self.resetConnectionMade()
+    self.resetConnectionLost()
     self.deferSendPending = None
     # Define internal metric names
     self.attemptedRelays = 'destinations.%s.attemptedRelays' % self.destinationName
     self.fullQueueDrops = 'destinations.%s.fullQueueDrops' % self.destinationName
     self.queuedUntilConnected = 'destinations.%s.queuedUntilConnected' % self.destinationName
     self.relayMaxQueueLength = 'destinations.%s.relayMaxQueueLength' % self.destinationName
+
+
+  def resetConnectionMade(self):
+    self.connectionMade = Deferred()
+    self.connectionMade.addCallback(lambda:
+                                    self.router.addDestination(self.destination))
+
+  def resetConnectionLost(self):
+    self.connectionLost = Deferred()
+    self.connectionLost.addCallback(lambda:
+                                    self.router.removeDestination(self.destination))
 
   def scheduleSend(self):
     if self.deferSendPending and self.deferSendPending.active():
@@ -302,7 +314,7 @@ class CarbonClientFactory(ReconnectingClientFactory):
     log.clients("%s::clientConnectionLost (%s:%d) %s" % (self, connector.host, connector.port, reason.getErrorMessage()))
     self.connectedProtocol = None
     self.connectionLost.callback(0)
-    self.connectionLost = Deferred()
+    self.resetConnectionLost()
 
   def clientConnectionFailed(self, connector, reason):
     ReconnectingClientFactory.clientConnectionFailed(self, connector, reason)
@@ -325,7 +337,7 @@ class CarbonClientFactory(ReconnectingClientFactory):
     return readyToStop
 
   def __str__(self):
-    return 'CarbonClientFactory(%s:%d:%s)' % self.destination
+    return 'CarbonClientFactory(%s, %s:%d:%s)' % (self.router, self.destination)
   __repr__ = __str__
 
 
@@ -352,8 +364,7 @@ class CarbonClientManager(Service):
       return
 
     log.clients("connecting to carbon daemon at %s:%d:%s" % destination)
-    self.router.addDestination(destination)
-    factory = self.client_factories[destination] = CarbonClientFactory(destination)
+    factory = self.client_factories[destination] = CarbonClientFactory(router, destination)
     connectAttempted = DeferredList(
         [factory.connectionMade, factory.connectFailed],
         fireOnOneCallback=True,
